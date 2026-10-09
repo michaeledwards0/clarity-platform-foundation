@@ -1,0 +1,323 @@
+name: deploy
+
+# Single pipeline for terraform + dashboard + voice-relay, replacing three
+# independently-triggered workflow files (terraform.yml/dashboard.yml/
+# voice-relay.yml). Those fired with no ordering relative to each other: a
+# push touching more than one path could run a terraform apply (which can
+# restart the App Services or change their settings/network access)
+# concurrently with a zip deploy to one of those same App Services — a real
+# race that caused an outage. `needs:` below forces terraform-apply (when it
+# runs) to finish before either app deploy starts; the `changes` job means a
+# push touching only one path still only runs that path's job, same as
+# before.
+#
+# terraform-apply/deploy-dashboard/deploy-voice-relay all accept both
+# `push` and `workflow_dispatch` as trigger events -- a manual dispatch is
+# already an explicit, deliberate action (someone chose to run it), so
+# gating it out here just meant a stuck or failed push-triggered run had
+# no way to be manually re-applied without `gh run rerun` on that exact
+# run. Learned the hard way: a run stuck in GitHub's own queue for 50+
+# minutes with no incident on githubstatus.com, and workflow_dispatch
+# silently only ran terraform-plan before this fix.
+
+on:
+  pull_request:
+    paths: ["terraform/**", ".github/workflows/deploy.yml"]
+  push:
+    branches: [main]
+    paths: ["terraform/**", "dashboard/**", "voice-relay/**", ".github/workflows/deploy.yml"]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required for OIDC federation, no client secret involved
+  contents: read
+  pull-requests: read # changes job (dorny/paths-filter) calls the GitHub API to list a PR's changed files -- only needed for pull_request events, but harmless on push
+
+# One pipeline run at a time per branch, queued rather than run concurrently
+# — a second push landing mid-deploy waits its turn instead of racing the
+# first. cancel-in-progress stays false: a queued (not yet started) run for
+# an older commit is superseded by GitHub Actions automatically once a newer
+# one queues on the same ref, and since each run deploys the full current
+# state of main, no change is actually lost by skipping the older one.
+concurrency:
+  group: clarity-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      terraform: ${{ steps.filter.outputs.terraform || steps.manual.outputs.all }}
+      dashboard: ${{ steps.filter.outputs.dashboard || steps.manual.outputs.all }}
+      voice_relay: ${{ steps.filter.outputs.voice_relay || steps.manual.outputs.all }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # workflow_dispatch has no before/after commit range to diff, so treat
+      # a manual run as "run everything" rather than skipping every job.
+      - name: Manual dispatch runs everything
+        id: manual
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "all=true" >> "$GITHUB_OUTPUT"
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          filters: |
+            terraform:
+              - 'terraform/**'
+            dashboard:
+              - 'dashboard/**'
+            voice_relay:
+              - 'voice-relay/**'
+
+  terraform-plan:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform init
+        run: terraform init -backend-config=backend.hcl
+        env:
+          ARM_USE_OIDC: "true"
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        run: terraform plan -input=false
+        env:
+          ARM_USE_OIDC: "true"
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_org_id: ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id: ${{ github.repository_id }}
+          TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+          TF_VAR_dockerhub_pat: ${{ secrets.DOCKERHUB_PAT }}
+
+  terraform-apply:
+    needs: [changes, terraform-plan]
+    if: |
+      needs.changes.outputs.terraform == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: production # add a required-reviewer gate on this environment in repo settings
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform init
+        run: terraform init -backend-config=backend.hcl
+        env:
+          ARM_USE_OIDC: "true"
+
+      - name: terraform apply
+        run: terraform apply -input=false -auto-approve
+        env:
+          ARM_USE_OIDC: "true"
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_org_id: ${{ github.repository_owner_id }}
+          TF_VAR_github_repo_id: ${{ github.repository_id }}
+          TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+          TF_VAR_dockerhub_pat: ${{ secrets.DOCKERHUB_PAT }}
+
+  deploy-dashboard:
+    needs: [changes, terraform-apply]
+    # always(): a job is auto-skipped by default when any of its `needs` was
+    # skipped, which terraform-apply legitimately is on most pushes (no
+    # terraform/ change). Re-check the actual condition by hand instead.
+    if: |
+      always() &&
+      needs.changes.outputs.dashboard == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Build client-side, not via Oryx server-side (SCM_DO_BUILD_DURING_DEPLOYMENT
+      # is now false — see terraform/modules/app-service). Oryx's own build
+      # compresses a large node_modules into node_modules.tar.gz/.tar.zst and
+      # relies on the runtime container extracting it back out at startup —
+      # a real, still-open class of bug (multiple issues on microsoft/Oryx:
+      # #364, #567, #361 — "node_modules.tar.gz is not uncompressed [properly]",
+      # "there isn't a direct way to disable this behavior"). Hit exactly this
+      # in production: node_modules deployed empty, `next start` failed with
+      # exit code 127 (command not found) and zero output, 503 until fixed.
+      # Shipping already-built node_modules/.next as plain files sidesteps the
+      # whole fragile compress-then-extract path.
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Full build output now, not source-only — node_modules and .next are
+      # gitignored but very much present after the build step above.
+      #
+      # -y (--symlinks) is load-bearing, not cosmetic: plain `zip` follows
+      # symlinks by default, copying the TARGET file's bytes in under the
+      # LINK's name. node_modules/.bin/next is a symlink to
+      # node_modules/next/dist/bin/next -- dereferencing it leaves that
+      # script's content sitting at the wrong path, and Next's launcher
+      # does `require('../server/require-hook')` relative to its OWN file
+      # location, so it resolves to node_modules/server/require-hook (does
+      # not exist) instead of node_modules/next/dist/server/require-hook.
+      # Caused a real production outage: MODULE_NOT_FOUND at container
+      # startup, first real deploy since the client-side-build fix landed.
+      - name: Zip build output
+        run: zip -rqy ../dashboard.zip . -x ".git/*"
+
+      # --async: a plain `az webapp deploy` sync-waits on Kudu and has
+      # 504'd here before mid-build even though the deploy went on to
+      # succeed server-side — that's a Kudu-side timeout on the status
+      # check itself, not a quirk of running this locally, so it applies
+      # to a hosted runner too. Poll Kudu directly instead of trusting the
+      # CLI's own wait.
+      - name: Deploy (async)
+        run: |
+          az webapp deploy \
+            --resource-group clarity-platform-rg \
+            --name clarity-dashboard2 \
+            --src-path ../dashboard.zip \
+            --type zip \
+            --async true
+
+      - name: Wait for the deployment to finish
+        run: |
+          CREDS=$(az webapp deployment list-publishing-credentials \
+            --resource-group clarity-platform-rg --name clarity-dashboard2 \
+            --query "{u:publishingUserName,p:publishingPassword}" -o json)
+          USER=$(echo "$CREDS" | jq -r .u)
+          PASS=$(echo "$CREDS" | jq -r .p)
+          for i in $(seq 1 60); do
+            STATUS=$(curl -s -u "$USER:$PASS" \
+              "https://clarity-dashboard2.scm.azurewebsites.net/api/deployments/latest" \
+              | jq -r '.status // empty')
+            echo "poll $i: status=$STATUS"
+            if [ "$STATUS" = "4" ]; then echo "Deployment succeeded"; exit 0; fi
+            if [ "$STATUS" = "3" ]; then echo "Deployment failed"; exit 1; fi
+            sleep 20
+          done
+          echo "Timed out waiting for deployment to finish"; exit 1
+
+  deploy-voice-relay:
+    needs: [changes, terraform-apply]
+    if: |
+      always() &&
+      needs.changes.outputs.voice_relay == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: voice-relay
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Build client-side, not via Oryx server-side (SCM_DO_BUILD_DURING_DEPLOYMENT
+      # is now false — see terraform/modules/voice-relay). Oryx's own build
+      # compresses a large node_modules into node_modules.tar.gz/.tar.zst and
+      # relies on the runtime container extracting it back out at startup —
+      # a real, still-open class of bug (microsoft/Oryx#364, #567, #361).
+      # Hit exactly this on the dashboard the same day this service was
+      # first deployed: node_modules deployed empty, the app failed to
+      # start (exit 127), 503 until fixed. Applying the same fix here
+      # preemptively rather than waiting to hit it again.
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Full build output now, not source-only — node_modules and dist/ are
+      # gitignored but very much present after the build step above.
+      #
+      # -y (--symlinks): same fix as deploy-dashboard's zip step -- plain
+      # zip dereferences node_modules/.bin/* symlinks by default, which
+      # broke the dashboard's own container startup (see that step's
+      # comment). This service's start script (`node dist/server.js`)
+      # doesn't go through a .bin symlink, but node_modules still has
+      # plenty of them from other dependencies -- fixed here too rather
+      # than leaving a latent copy of the same bug.
+      - name: Zip build output
+        run: zip -rqy ../voice-relay.zip . -x ".git/*"
+
+      # --async + poll Kudu directly, same reasoning as deploy-dashboard: a
+      # sync `az webapp deploy` has 504'd here on Kudu's own status check
+      # even after the deploy went on to succeed server-side.
+      - name: Deploy (async)
+        run: |
+          az webapp deploy \
+            --resource-group clarity-platform-rg \
+            --name clarity-voice \
+            --src-path ../voice-relay.zip \
+            --type zip \
+            --async true
+
+      - name: Wait for the deployment to finish
+        run: |
+          CREDS=$(az webapp deployment list-publishing-credentials \
+            --resource-group clarity-platform-rg --name clarity-voice \
+            --query "{u:publishingUserName,p:publishingPassword}" -o json)
+          USER=$(echo "$CREDS" | jq -r .u)
+          PASS=$(echo "$CREDS" | jq -r .p)
+          for i in $(seq 1 60); do
+            STATUS=$(curl -s -u "$USER:$PASS" \
+              "https://clarity-voice.scm.azurewebsites.net/api/deployments/latest" \
+              | jq -r '.status // empty')
+            echo "poll $i: status=$STATUS"
+            if [ "$STATUS" = "4" ]; then echo "Deployment succeeded"; exit 0; fi
+            if [ "$STATUS" = "3" ]; then echo "Deployment failed"; exit 1; fi
+            sleep 20
+          done
+          echo "Timed out waiting for deployment to finish"; exit 1

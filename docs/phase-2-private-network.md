@@ -32,9 +32,8 @@ Module: [`terraform/modules/networking`](../terraform/modules/networking/main.tf
 
 ## Evidence
 
-**[VERIFY: capture these, see [screenshots/README.md](../screenshots/README.md)]**
+- Subnets with delegation <img width="1314" height="178" alt="image" src="https://github.com/user-attachments/assets/1014d183-e1dd-42d1-9bfb-18c6e13c2748" />
+- Private endpoints for Key Vault and PostgresSQL server <img width="1548" height="284" alt="image" src="https://github.com/user-attachments/assets/d1411a73-2e1c-486b-8010-a021074cdfbf" />
+- Private DNS zones and records <img width="1551" height="126" alt="image" src="https://github.com/user-attachments/assets/c810d484-e532-40ab-ba38-d19bfc11c068" /> <img width="1043" height="443" alt="image" src="https://github.com/user-attachments/assets/d67f996b-36b4-477c-a577-5479401fafe2" />
+- App service vnet integration- route all enabled <img width="1260" height="787" alt="image" src="https://github.com/user-attachments/assets/f29d74d1-b058-49bc-947e-0f5976d05fcf" />
 
-- `screenshots/phase-2/01-vnet-subnets.png` — subnets with delegations
-- `screenshots/phase-2/02-private-endpoints.png` — Key Vault and Postgres private endpoints, approved
-- `screenshots/phase-2/03-private-dns.png` — DNS zone records pointing at 10.30.4.x
-- `screenshots/phase-2/04-app-service-vnet-integration.png` — route all enabled

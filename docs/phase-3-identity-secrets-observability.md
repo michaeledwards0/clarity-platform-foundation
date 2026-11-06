@@ -49,7 +49,7 @@ The fix was a second role, `clarity_app`, with `nobypassrls` that owns nothing, 
 
 ## Evidence
 
-- ## Managed identities <img width="1632" height="236" alt="image" src="https://github.com/user-attachments/assets/85467a12-417b-4ce5-aa4c-61a9cad445f3" />
+- ### Managed identities <img width="1632" height="236" alt="image" src="https://github.com/user-attachments/assets/85467a12-417b-4ce5-aa4c-61a9cad445f3" />
 - Keyvault RBAC for dashboard identitiy <img width="1438" height="454" alt="image" src="https://github.com/user-attachments/assets/24e654a9-cd76-4c40-80ab-ca07f77c4720" />
 - Alert rules <img width="1516" height="616" alt="image" src="https://github.com/user-attachments/assets/056787b3-e135-4823-ab4b-0422d6d19daa" />
 - Availability tests <img width="507" height="269" alt="image" src="https://github.com/user-attachments/assets/3bcce4ff-a19e-433c-8a20-86b0ea042af5" />

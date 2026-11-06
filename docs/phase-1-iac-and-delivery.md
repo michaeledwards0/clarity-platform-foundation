@@ -54,9 +54,8 @@ Its Azure access is **Contributor on the four Clarity resource groups and the st
 
 ## Evidence
 
-**[VERIFY: capture these, see [screenshots/README.md](../screenshots/README.md)]**
 
-- `screenshots/phase-1/01-pipeline-run.png` — a full green run showing job order
-- `screenshots/phase-1/02-federated-credentials.png` — the three federated credentials
-- `screenshots/phase-1/03-cicd-role-assignments.png` — CI identity scoped to resource groups only
-- `screenshots/phase-1/04-budget-alerts.png`
+- Successful CIDD pipeline run <img width="1464" height="705" alt="image" src="https://github.com/user-attachments/assets/858b3337-b211-4cfd-bb31-c492c6dbd85a" />
+- CI identity federated credentials <img width="1457" height="502" alt="image" src="https://github.com/user-attachments/assets/3db3872e-15a0-47e8-9c72-0f31761e4742" />
+- CI identity assignment scopes <img width="1245" height="315" alt="image" src="https://github.com/user-attachments/assets/b5965a53-8617-469c-be77-b48abc727c78" />
+  

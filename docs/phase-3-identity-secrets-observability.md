@@ -49,7 +49,7 @@ The fix was a second role, `clarity_app`, with `nobypassrls` that owns nothing, 
 
 ## Evidence
 
-  ## One Managed identity per workload |
+  ## One Managed identity per workload 
   img width="1632" height="236" alt="image" src="https://github.com/user-attachments/assets/85467a12-417b-4ce5-aa4c-61a9cad445f3" />
   
   ## Keyvault RBAC for dashboard identitiy
